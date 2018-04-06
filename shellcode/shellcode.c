@@ -8,28 +8,62 @@
 #pragma region ShellCode
 
 #define XOR_VAL 0x01010101
-#define XOR_BYTE 0x5
+#define XOR_BYTE 0x11
 
-#define ACTIVE_CODE_SZ 613
+#define ACTIVE_CODE_SZ 1045
 #define XOR_CODE_SZ 75
 
-#define KERNEL32DLL_HASH 1848363543
-#define EXITPROCESS_HASH 1944246398
+#define Kernel32Dll_HASH 1848363543
 
-// if we want to test our shell we won't need to encrypt it
-//#define debug_code
+// from kernel32
+#define ExitProcess_HASH 1944246398
+#define LoadLibrary_HASH 3960360590
+#define FreeLibrary_HASH 1305073056
+#define CreateFile_HASH  2080380837
+#define WriteFile_HASH	 3893000479
+#define CloseHandle_HASH 268277755
+#define GetLastError_HASH 1977227622
 
+// from advapi32
+#define OpenSCManagerA_HASH		 3194409588
+#define EnumServicesStatusA_HASH 1997515476
+#define CloseServiceHandle_HASH  3719674204
 
+#pragma region Prototypes
+
+// get peb for listing loaded dlls
 PPEB get_peb(void);
+
+// hash for wchar
 DWORD __stdcall unicode_ror13_hash(const WCHAR *unicode_string);
+
+// hash for char
 DWORD __stdcall ror13_hash(const char *string);
+
+// GetModuleHandle using ror_13 hash
 HMODULE __stdcall find_module_by_hash(DWORD hash);
+
+// find kernel32.dll module
 HMODULE __stdcall find_kernel32(void);
+
+// GetProcAddresss
 FARPROC __stdcall find_function(HMODULE module, DWORD hash);
+
+// usefull payload
 void __stdcall shell_entry();
+
+// function with xor-shellcode
+// First it decrypts usefull payload of shellcode and then jumps to it
+void __stdcall shell_code();
+
+/////////// help functions
+
+void __stdcall initError(FARPROC getLastError, int exit_code);
+
+// end of shell code
 void END_SHELLCODE(void);
 
-#pragma optimize("", off)  
+#pragma endregion Prototypes
 
 void __stdcall shell_code()
 {
@@ -61,16 +95,81 @@ void __stdcall shell_code()
 
 void __stdcall shell_entry()
 {
-	// work
-	HMODULE kern32 = find_kernel32();
-	FARPROC exit = find_function(kern32, EXITPROCESS_HASH);
+	// init
+	HMODULE hKernel = find_kernel32();
+	FARPROC exit = find_function(hKernel, ExitProcess_HASH);
+
+	FARPROC createFile; 
+	if (NULL == (createFile = find_function(hKernel, CreateFile_HASH)))
+		exit(1);
+
+	FARPROC writeFile;
+	if (NULL == (writeFile = find_function(hKernel, WriteFile_HASH)))
+		exit(2);
+
+	FARPROC closeHandle;
+	if (NULL == (closeHandle = find_function(hKernel, CloseHandle_HASH)))
+		exit(3);
+
+	char fileName[] = { 's','e','r','v','i','c','e','s','.','t','x','t', 0 };
+	char dllName[] = { 'A','d','v','a','p','i','3','2','.','d','l','l', 0 };
+
+	HANDLE hFile;
+	if (INVALID_HANDLE_VALUE == (hFile = (HANDLE)createFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)))
+		exit(4);
+
+	DWORD written;
+	if (!writeFile(hFile, fileName, 4, &written, NULL))
+		exit(5);
+
+	closeHandle(hFile);
+
+	// writing to file works
+	// then load advapi32.dll
+
+	FARPROC loadLibrary;
+	if (NULL == (loadLibrary = find_function(hKernel, LoadLibrary_HASH)))
+		exit(6);
 	
+	FARPROC freeLibrary;
+	if (NULL == (freeLibrary = find_function(hKernel, FreeLibrary_HASH)))
+		exit(7);
+
+	HMODULE hAdvapi;
+	if (NULL == (hAdvapi = (HMODULE)loadLibrary(dllName)))
+		exit(8);
+
+	// advapi is loaded
+	// then import functions
+
+	FARPROC openSCManager;
+	if (NULL == (openSCManager = find_function(hAdvapi, OpenSCManagerA_HASH)))
+		exit(9);
+
+	FARPROC enumServicesStatus;
+	if (NULL == (enumServicesStatus = find_function(hAdvapi, EnumServicesStatusA_HASH)))
+		exit(10);
+
+	FARPROC closeServiceHandle;
+	if (NULL == (closeServiceHandle = find_function(hAdvapi, CloseServiceHandle_HASH)))
+		exit(11);
+
+	////////////////////////////-------------- main body
+
+	// all functions are loaded
+	// then perform main task
+
+
+
+
+	// cleanup and exit
+	freeLibrary(hAdvapi);
 	exit(0);
 }
 
 HMODULE __stdcall find_kernel32(void)
 {
-	return find_module_by_hash(KERNEL32DLL_HASH);
+	return find_module_by_hash(Kernel32Dll_HASH);
 }
 
 HMODULE __stdcall find_module_by_hash(DWORD hash)
@@ -167,10 +266,25 @@ FARPROC __stdcall find_function(HMODULE module, DWORD hash)
 	return NULL;
 }
 
+////////////
+
+void __stdcall initError(FARPROC getLastError, int exit_code)
+{
+	int err = getLastError();
+
+	__asm
+	{
+		xor eax, eax
+		mov eax, err
+		xor eax, eax
+	}
+
+	exit(exit_code);
+}
+
+
 void __declspec(naked) END_SHELLCODE(void) {}
 
-
-#pragma optimize("", on)  
 #pragma endregion ShellCode
 
 
@@ -194,7 +308,7 @@ unsigned getFileSize(char* path)
 	return 0;
 }
 
-// find byte that won't be found in the byte code
+// find byte that won't be found in the shell byte code
 unsigned char find_xor_byte()
 {
 	for (int byte = 1; byte < 0xFF; byte++)
@@ -352,32 +466,6 @@ BOOL sc_write_bin(char *path)
 	return TRUE;
 }
 
-// load shell code to virtual memory and exec
-void sc_exec(char* path)
-{
-	unsigned fsize = getFileSize(path);
-	char* code = malloc(fsize);
-	
-	FILE* f = fopen(path, "rb");
-	fread(code, sizeof(char), fsize, f);
-	fclose(f);
-
-	LPVOID pspace = NULL;
-
-	pspace = VirtualAlloc(NULL, fsize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-	if (!pspace) {
-		printf("Error, can't allocate virtual page\n");
-		free(code); 
-		return;
-	}
-
-	memcpy(pspace, code, fsize);
-	((void(*)())pspace)();//call shellcode
-
-	VirtualFree(pspace, 0, MEM_RELEASE);
-	free(code); 
-}
-
 int main(int argc, char *argv[])
 {
 	//shell_code();
@@ -414,3 +502,83 @@ int main(int argc, char *argv[])
 
 	return 0;
 }
+
+
+/*
+
+DWORD countServices()
+{
+SC_HANDLE h_SCM;
+ENUM_SERVICE_STATUSA struct_ServiceStatus;
+ENUM_SERVICE_STATUSA *lpServiceStatus;
+BOOL b_RetVal = FALSE;
+DWORD dw_BytesNeeded;
+DWORD dw_ServiceCount;
+DWORD dw_ResumeHandle = 0;
+DWORD dw_ServiceType;
+DWORD dw_ServiceState;
+
+
+h_SCM = OpenSCManagerA(NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE);
+
+if (h_SCM == NULL)
+{
+printf("Open service control manager failed : %d\n", GetLastError());
+return 0;
+}
+
+//We are interested every service
+dw_ServiceType = SERVICE_WIN32;
+
+// interested to know about services in all states
+dw_ServiceState = SERVICE_STATE_ALL;
+
+//Call EnumServicesStatus using the handle returned by OpenSCManager
+b_RetVal = EnumServicesStatusA(
+h_SCM,
+dw_ServiceType,
+dw_ServiceState,
+&struct_ServiceStatus,
+sizeof(struct_ServiceStatus),
+&dw_BytesNeeded,
+&dw_ServiceCount,
+&dw_ResumeHandle);
+
+DWORD dw_Error = GetLastError();
+
+// Verify if EnumServicesStatus needs more memory space
+if ((b_RetVal == FALSE) || dw_Error == ERROR_MORE_DATA)
+{
+DWORD dw_Bytes = dw_BytesNeeded + sizeof(ENUM_SERVICE_STATUSA);
+lpServiceStatus = new ENUM_SERVICE_STATUSA[dw_Bytes];
+b_RetVal = EnumServicesStatusA(h_SCM,
+dw_ServiceType,
+dw_ServiceState,
+lpServiceStatus,
+dw_Bytes,
+&dw_BytesNeeded,
+&dw_ServiceCount,
+&dw_ResumeHandle);
+
+if (b_RetVal == FALSE)
+{
+CloseServiceHandle(h_SCM);
+printf("EnumerateServiceStatus failed : %d\n", GetLastError());
+return 0;
+}
+}
+
+//for (DWORD i = 0; i< dw_ServiceCount; i++)
+//{
+//	printf("%s\n", lpServiceStatus[i].lpDisplayName);
+//}
+
+//Close the SC_HANLDE returned by OpenSCManager
+CloseServiceHandle(h_SCM);
+
+return dw_ServiceCount;
+}
+
+
+
+*/
