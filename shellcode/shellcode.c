@@ -8,10 +8,13 @@
 #pragma region ShellCode
 
 #define XOR_VAL 0x01010101
-#define XOR_BYTE 0x2
+#define XOR_BYTE 0x5
 
-#define ACTIVE_CODE_SZ 85
+#define ACTIVE_CODE_SZ 613
 #define XOR_CODE_SZ 75
+
+#define KERNEL32DLL_HASH 1848363543
+#define EXITPROCESS_HASH 1944246398
 
 // if we want to test our shell we won't need to encrypt it
 //#define debug_code
@@ -35,8 +38,7 @@ void __stdcall shell_code()
 
 	__asm
 	{
-		xor eax, eax
-		mov al, ACTIVE_CODE_SZ
+		mov ax, ACTIVE_CODE_SZ
 		mov sz, eax
 	}
 	
@@ -60,22 +62,15 @@ void __stdcall shell_code()
 void __stdcall shell_entry()
 {
 	// work
-	//HMODULE kern32 = find_kernel32();
-	//char name[] = { 'E','x','i','t','P','r','o','c','e','s','s', 0 };
-	//FARPROC exit = find_function(kern32, ror13_hash((char*)name));
-	int s = 0;
-	for (int i = 0; i < 100; i++)
-		s += i;
-
-	//exit(0);
+	HMODULE kern32 = find_kernel32();
+	FARPROC exit = find_function(kern32, EXITPROCESS_HASH);
+	
+	exit(0);
 }
-
-void __declspec(naked) END_SHELLCODE(void) {}
-
 
 HMODULE __stdcall find_kernel32(void)
 {
-	return find_module_by_hash(ror13_hash("KERNEL32.DLL"));
+	return find_module_by_hash(KERNEL32DLL_HASH);
 }
 
 HMODULE __stdcall find_module_by_hash(DWORD hash)
@@ -171,6 +166,9 @@ FARPROC __stdcall find_function(HMODULE module, DWORD hash)
 
 	return NULL;
 }
+
+void __declspec(naked) END_SHELLCODE(void) {}
+
 
 #pragma optimize("", on)  
 #pragma endregion ShellCode
