@@ -591,7 +591,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	printf("Success. Enter any key to exit\n");
+	printf("Success.\nLaunch vulnerable program.\nEnter any key to exit\n");
 
 	if (getchar())
 		return 0;
